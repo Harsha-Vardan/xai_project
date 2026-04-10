@@ -276,6 +276,56 @@ def hybrid_importance_dynamic(
     return sentences, final_scores, loo_scores, selected_indices, original_output
 
 
+# ========================
+# HYBRID (LOO + SHAP)
+# ========================
+def hybrid_loo_shap(
+    context: str,
+    threshold: float = 0.1,
+    num_samples: int = 20,
+    seed: int = 42,
+    model=model_fn,
+    counter: Optional[Dict[str, int]] = None,
+) -> Tuple[List[str], List[float], List[float], List[int], str]:
+
+    # Step 1: LOO
+    sentences, loo_scores, original_output = loo_importance(
+        context, model=model, counter=counter
+    )
+
+    n = len(sentences)
+    if n == 0:
+        return [], [], [], [], original_output
+
+    # Step 2: Dynamic selection
+    selected_indices = [i for i, score in enumerate(loo_scores) if score > threshold]
+
+    if not selected_indices:
+        best_idx = max(range(n), key=lambda i: loo_scores[i])
+        selected_indices = [best_idx]
+
+    # Step 3: Build reduced text
+    selected_text = " ".join(sentences[i] for i in selected_indices)
+
+    # Step 4: Apply SHAP on reduced text
+    _, shap_scores_selected, _ = lshap_importance(
+        selected_text,
+        num_samples=num_samples,
+        seed=seed,
+        model=model,
+        counter=counter,
+    )
+
+    # Step 5: Map back to full sentence list
+    final_scores = [0.0] * n
+
+    for local_idx, original_idx in enumerate(selected_indices):
+        if local_idx < len(shap_scores_selected):
+            final_scores[original_idx] = shap_scores_selected[local_idx]
+
+    return sentences, final_scores, loo_scores, selected_indices, original_output
+
+
 def _print_scores(title: str, sentences: List[str], scores: List[float]) -> None:
     print(f"\n{title}")
     for idx, (sentence, score) in enumerate(zip(sentences, scores), start=1):
@@ -392,11 +442,35 @@ def _run_dataset(dataset_name: str) -> Dict[str, object]:
     )
     hybrid_faith = faithfulness(context, hybrid_scores, top_k=2, counter=hybrid_counter)
 
+    # Hybrid (LOO + SHAP)
+    hybrid_shap_counter = {"count": 0}
+    (
+        hybrid_shap_sentences,
+        hybrid_shap_scores,
+        hybrid_shap_loo_scores,
+        hybrid_shap_selected_indices,
+        _,
+    ) = hybrid_loo_shap(
+        context,
+        threshold=0.1,
+        num_samples=20,
+        seed=42,
+        counter=hybrid_shap_counter,
+    )
+
+    hybrid_shap_faith = faithfulness(
+        context,
+        hybrid_shap_scores,
+        top_k=2,
+        counter=hybrid_shap_counter,
+    )
+
     _print_scores("LOO Importance Scores:", loo_sentences, loo_scores)
     _print_scores("LIME Importance Scores:", lime_sentences, lime_scores)
     _print_scores("C-LIME Importance Scores:", clime_sentences, clime_scores)
     _print_scores("L-SHAP Importance Scores:", lshap_sentences, lshap_scores)
     _print_scores("Dynamic Hybrid Importance Scores:", hybrid_sentences, hybrid_scores)
+    _print_scores("Hybrid (LOO+SHAP) Importance Scores:", hybrid_shap_sentences, hybrid_shap_scores)
 
     print("\n--- RESULTS ---")
     print("LOO:", loo_scores)
@@ -404,6 +478,7 @@ def _run_dataset(dataset_name: str) -> Dict[str, object]:
     print("C-LIME:", clime_scores)
     print("L-SHAP:", lshap_scores)
     print("Hybrid:", hybrid_scores)
+    print("Hybrid (LOO+SHAP):", hybrid_shap_scores)
 
     print("\nDynamic Hybrid Scores:", hybrid_scores)
     print("Hybrid selected indices from LOO (threshold > 0.1):", [idx + 1 for idx in hybrid_selected_indices])
@@ -415,6 +490,7 @@ def _run_dataset(dataset_name: str) -> Dict[str, object]:
     print(f"  C-LIME: {clime_faith}")
     print(f"  L-SHAP: {lshap_faith}")
     print(f"  Hybrid: {hybrid_faith}")
+    print(f"  Hybrid (LOO+SHAP): {hybrid_shap_faith}")
 
     print("\nModel Calls")
     print(f"  LOO pipeline calls: {loo_counter['count']}")
@@ -422,6 +498,7 @@ def _run_dataset(dataset_name: str) -> Dict[str, object]:
     print(f"  C-LIME pipeline calls: {clime_counter['count']}")
     print(f"  L-SHAP pipeline calls: {lshap_counter['count']}")
     print(f"  Hybrid pipeline calls: {hybrid_counter['count']}")
+    print(f"  Hybrid (LOO+SHAP) pipeline calls: {hybrid_shap_counter['count']}")
 
     scores_map = {
         "LOO": loo_scores,
@@ -429,6 +506,7 @@ def _run_dataset(dataset_name: str) -> Dict[str, object]:
         "C-LIME": clime_scores,
         "L-SHAP": lshap_scores,
         "Hybrid": hybrid_scores,
+        "Hybrid-SHAP": hybrid_shap_scores,
     }
     faithfulness_map = {
         "LOO": loo_faith,
@@ -436,6 +514,7 @@ def _run_dataset(dataset_name: str) -> Dict[str, object]:
         "C-LIME": clime_faith,
         "L-SHAP": lshap_faith,
         "Hybrid": hybrid_faith,
+        "Hybrid-SHAP": hybrid_shap_faith,
     }
     model_calls_map = {
         "LOO": loo_counter["count"],
@@ -443,6 +522,7 @@ def _run_dataset(dataset_name: str) -> Dict[str, object]:
         "C-LIME": clime_counter["count"],
         "L-SHAP": lshap_counter["count"],
         "Hybrid": hybrid_counter["count"],
+        "Hybrid-SHAP": hybrid_shap_counter["count"],
     }
 
     return {
@@ -474,7 +554,9 @@ def main() -> None:
         )
     print(f"Hybrid works consistently: {'YES' if consistent else 'NO'}")
 
-    _plot_results(results, output_dir="plots")
+    # Save plots in the same folder as this script: xai_explainer/plots
+    local_plots_dir = str(Path(__file__).resolve().parent / "plots")
+    _plot_results(results, output_dir=local_plots_dir)
 
 
 if __name__ == "__main__":
